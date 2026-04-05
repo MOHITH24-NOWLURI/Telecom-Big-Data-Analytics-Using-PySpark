@@ -1,0 +1,163 @@
+from pyspark.sql import SparkSession from pyspark.sql.functions import (
+col, sum, avg, count, max, min, stddev, hour, dayofmonth, month, year, to_timestamp, when,
+approx_count_distinct, dense_rank, row_number, percentile_approx
+)
+from pyspark.sql.window import Window
+spark = SparkSession.builder \
+.appName("Telecom1GBBigDataProject") \
+.config("spark.sql.shuffle.partitions", "200") \
+.getOrCreate()
+
+# Read Data
+cdr = spark.read.option("header", "true") \
+.option("inferSchema", "true") \
+.csv("telecom_cdr_1gb.csv")
+# Cleaning
+cdr = cdr.dropna()
+cdr = cdr.withColumn("event_time", to_timestamp("event_time"))
+
+# Feature Engineering
+cdr = cdr.withColumn("hour", hour("event_time"))
+cdr = cdr.withColumn("day", dayofmonth("event_time")) cdr = cdr.withColumn("month", month("event_time")) cdr = cdr.withColumn("year", year("event_time"))
+
+# Cache cdr.cache()
+
+# Operator KPIs
+operator_kpis = cdr.groupBy("operator").agg( sum("charge").alias("total_revenue"), approx_count_distinct("msisdn").alias("users"), avg("charge").alias("avg_charge"),
+max("charge").alias("max_charge"), min("charge").alias("min_charge"), stddev("charge").alias("std_charge")
+)
+operator_kpis = operator_kpis.withColumn( "arpu", col("total_revenue") / col("users")
+)
+# Network Quality
+drop_rate_operator = cdr.groupBy("operator") \
+.agg(avg("call_drop").alias("drop_rate"))
+
+drop_rate_circle = cdr.groupBy("circle") \
+.agg(avg("call_drop").alias("drop_rate"))
+
+# Time Analysis
+peak_hours = cdr.groupBy("hour") \
+.agg(count("*").alias("events")) \
+.orderBy(col("events").desc())
+monthly_usage = cdr.groupBy("year", "month") \
+.agg(count("*").alias("events"))
+# Call Type Analysis
+call_type_dist = cdr.groupBy("call_type") \
+.agg(count("*").alias("count"),
+sum("charge").alias("revenue"))
+# Heavy Users
+heavy_users = cdr.groupBy("msisdn").agg( sum("data_mb").alias("total_data"), sum("charge").alias("revenue")
+).filter(
+(col("total_data") > 100000) & (col("revenue") < 500)
+)
+# Usage Category
+cdr = cdr.withColumn(
+"usage_category", when(col("data_mb") > 2000, "HIGH")
+.when(col("data_mb") > 500, "MEDIUM")
+.otherwise("LOW")
+)
+usage_category_dist = cdr.groupBy("usage_category") \
+.agg(count("*").alias("count"))
+# Window Functions
+user_spend = cdr.groupBy("operator", "msisdn") \
+.agg(sum("charge").alias("spent"))
+window = Window.partitionBy("operator").orderBy(col("spent").desc()) top_users = user_spend.withColumn(
+"rank", dense_rank().over(window)
+).filter(col("rank") <= 5)
+
+# Statistical Analysis median_charge = cdr.select(
+percentile_approx("charge", 0.5).alias("median_charge")
+)
+p90_charge = cdr.select(
+percentile_approx("charge", 0.9).alias("p90_charge")
+)
+# Repartition & Heavy Aggregation cdr_rep = cdr.repartition("operator")
+operator_event_count = cdr_rep.groupBy("operator") \
+.agg(count("*").alias("event_count")) operator_event_count.persist()
+# Write Outputs operator_kpis.write.mode("overwrite").parquet("output/operator_kpis") drop_rate_operator.write.mode("overwrite").parquet("output/drop_rate_operator"
+)
+drop_rate_circle.write.mode("overwrite").parquet("output/drop_rate_circle")
+peak_hours.write.mode("overwrite").parquet("output/peak_hours") call_type_dist.write.mode("overwrite").parquet("output/call_type_dist") heavy_users.write.mode("overwrite").parquet("output/heavy_users") top_users.write.mode("overwrite").parquet("output/top_users") usage_category_dist.write.mode("overwrite").parquet("output/usage_category_di st")
+
+spark.stop()
+
+
+import os
+import pandas as pd
+
+# Root folder containing subfolders with parquet data root_folder = "/content/gdrive/MyDrive/PROJECToutput"
+
+# Output Excel file
+output_excel = "/content/gdrive/MyDrive/PROJECTfinal_output.xlsx"
+
+# Excel writer (single file, multiple sheets)
+with pd.ExcelWriter(output_excel, engine="xlsxwriter") as writer:
+
+for subfolder in os.listdir(root_folder):
+subfolder_path = os.path.join(root_folder, subfolder)
+# Process only directories
+if os.path.isdir(subfolder_path):
+# Read all parquet files inside the subfolder df = pd.read_parquet(subfolder_path)
+ 
+
+ 
+# Check if the DataFrame is too large for an Excel sheet (max 1,048,576 rows)
+
+if df.shape[0] > 1048576:
+print(f"Skipping '{subfolder}' as it has {df.shape[0]} rows, which exceeds the Excel limit of 1,048,576 rows.")
+continue
+
+# Sheet name must be <= 31 characters sheet_name = subfolder[:31]
+# Write dataframe to a separate sheet df.to_excel(
+writer, sheet_name=sheet_name, index=False
+)
+
+print("✅ All parquet outputs written into single Excel file successfully")
+
+
+
+ 
+ ###VISUALIZATION	CODE
+plt.figure(figsize=(10, 6))
+plt.plot(df_year["year"], df_year["total_revenue"], marker="o") plt.title("Total Revenue by Year")
+plt.show()
+pivot = df_month.pivot(index="month", columns="year", values="total_revenue")
+pivot.plot(figsize=(12, 6))
+plt.title("Monthly Revenue Trend (5 Years)") plt.show()
+plt.figure(figsize=(12, 6))
+sns.barplot(data=df_op_year, x="year", y="total_revenue", hue="operator") plt.title("Operator Revenue by Year")
+plt.show()
+
+plt.figure(figsize=(12, 6))
+sns.barplot(data=df_circle, x="year", y="drop_rate", hue="circle") plt.title("Call Drop Rate by Circle ")
+plt.show()
+plt.figure(figsize=(12, 6))
+sns.barplot(data=df_usage, x="year", y="events", hue="usage_category") plt.title("Usage Category Trend")
+plt.show()
+ 
+plt.figure(figsize=(12, 6))
+sns.lineplot(data=df_op_year, x="year", y="arpu", hue="operator", marker="o") plt.title("ARPU Trend by Operator")
+plt.show()
+latest_year = df_op_year["year"].max()
+latest_df = df_op_year[df_op_year["year"] == latest_year] plt.figure(figsize=(8, 8))
+plt.pie(latest_df["total_revenue"], labels=latest_df["operator"], autopct="%1.1f%%")
+plt.title("Revenue Market Share") plt.show()
+
+heat_df = df_month.pivot(index="month", columns="year", values="events") plt.figure(figsize=(10, 6))
+sns.heatmap(heat_df, cmap="Blues") plt.title("Event Volume Heatmap") plt.show()
+
+plt.figure(figsize=(10, 6))
+sns.boxplot(data=df_op_year, x="operator", y="avg_charge") plt.title("Average Charge Distribution")
+plt.show()
+df_churn = pd.read_parquet("/content/gdrive/MyDrive/PROJECToutput/churn_risk_users") churn_counts = df_churn["churn_risk"].value_counts()
+plt.figure(figsize=(7, 5)) churn_counts.plot(kind="bar") plt.title("Churn Risk Distribution") plt.show()
+plt.figure(figsize=(10, 5))
+top_revenue_users = df_churn.sort_values("total_spent", ascending=False).head(10)
+sns.barplot(x="msisdn", y="total_spent", data=top_revenue_users) plt.title("Top 10 Revenue Customers")
+plt.show()
+
+sample_quality = df_churn.sample(5000, random_state=42)
+plt.figure(figsize=(8, 6))
+sns.scatterplot(data=sample_quality, x="avg_drop", y="total_spent", alpha=0.5) plt.title("Call Drop vs Revenue")
+plt.show()
+ 
